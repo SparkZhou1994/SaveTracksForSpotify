@@ -6,25 +6,43 @@ Spotify歌单保存脚本
 
 import os
 import sys
+from dotenv import load_dotenv
 import json
 import csv
 import base64
 import requests
 import time
+import webbrowser
+import urllib.parse
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import argparse
 
+
+def load_environment():
+    """加载环境变量配置"""
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+        print(f"✅ 已加载环境配置: {env_path}")
+    else:
+        print("⚠️  未找到.env文件，将使用系统环境变量")
+
+
 class SpotifyPlaylistSaver:
     """Spotify歌单保存器"""
-    
-    def __init__(self, client_id: str = None, client_secret: str = None):
+
+    def __init__(self, client_id: str = None, client_secret: str = None, redirect_uri: str = None):
         self.client_id = client_id or os.getenv('SPOTIFY_CLIENT_ID')
         self.client_secret = client_secret or os.getenv('SPOTIFY_CLIENT_SECRET')
+        self.redirect_uri = redirect_uri or os.getenv('SPOTIFY_REDIRECT_URI', 'http://localhost:8888/callback')
         self.access_token = None
+        self.refresh_token = None
         self.user_id = None
         self.api_base = "https://api.spotify.com/v1"
+        self.auth_code = None
         
     def print_request_info(self, method: str, url: str, headers: Dict = None, data: Any = None):
         """打印请求参数信息"""
@@ -82,51 +100,129 @@ class SpotifyPlaylistSaver:
         
         print("=" * 80)
     
-    def authenticate(self) -> bool:
-        """获取Spotify API访问令牌"""
-        print("🔐 开始Spotify API认证...")
-        
-        if not self.client_id:
-            print("❌ 错误: 需要设置SPOTIFY_CLIENT_ID环境变量")
-            print("💡 提示: 在 https://developer.spotify.com/dashboard 创建应用获取")
+    def refresh_access_token(self) -> bool:
+        """使用刷新令牌获取新的访问令牌"""
+        if not self.refresh_token:
+            print("❌ 错误: 没有刷新令牌，需要重新认证")
             return False
-        
-        if not self.client_secret:
-            print("❌ 错误: 需要设置SPOTIFY_CLIENT_SECRET环境变量")
-            return False
-        
-        auth_url = "https://accounts.spotify.com/api/token"
+
+        print("🔄 刷新访问令牌...")
+
+        token_url = "https://accounts.spotify.com/api/token"
         auth_header = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
-        
+
         headers = {
             "Authorization": f"Basic {auth_header}",
             "Content-Type": "application/x-www-form-urlencoded"
         }
-        
+
         data = {
-            "grant_type": "client_credentials"
+            "grant_type": "refresh_token",
+            "refresh_token": self.refresh_token
         }
-        
-        # 打印请求信息
-        self.print_request_info("POST", auth_url, headers, data)
-        
+
         try:
-            response = requests.post(auth_url, headers=headers, data=data)
-            
-            # 打印响应信息
-            self.print_response_info(response)
-            
+            response = requests.post(token_url, headers=headers, data=data)
+
             if response.status_code == 200:
                 token_data = response.json()
                 self.access_token = token_data.get("access_token")
+                # 更新刷新令牌（如果返回）
+                if 'refresh_token' in token_data:
+                    self.refresh_token = token_data.get("refresh_token")
+                print("✅ 访问令牌刷新成功")
+                return True
+            else:
+                print(f"❌ 刷新令牌失败: {response.status_code}")
+                return False
+
+        except Exception as e:
+            print(f"❌ 刷新令牌请求失败: {e}")
+            return False
+
+    def authenticate(self) -> bool:
+        """使用OAuth 2.0授权码流程获取访问令牌"""
+        print("🔐 开始Spotify API认证...")
+
+        if not self.client_id:
+            print("❌ 错误: 需要设置SPOTIFY_CLIENT_ID环境变量")
+            print("💡 提示: 在 https://developer.spotify.com/dashboard 创建应用获取")
+            return False
+
+        if not self.client_secret:
+            print("❌ 错误: 需要设置SPOTIFY_CLIENT_SECRET环境变量")
+            return False
+
+        # 1. 构建授权URL
+        scopes = "playlist-modify-public playlist-modify-private user-library-modify user-read-private user-read-email"
+        auth_params = {
+            "client_id": self.client_id,
+            "response_type": "code",
+            "redirect_uri": self.redirect_uri,
+            "scope": scopes,
+            "show_dialog": "true"
+        }
+
+        auth_url = f"https://accounts.spotify.com/authorize?{urllib.parse.urlencode(auth_params)}"
+
+        print(f"\n🔗 请访问以下URL进行授权:")
+        print(f"   {auth_url}")
+        print(f"\n💡 授权后会跳转到本地地址，复制地址栏中的code参数值")
+
+        # 尝试自动打开浏览器
+        try:
+            webbrowser.open(auth_url)
+            print(f"✅ 浏览器已自动打开，请完成授权")
+        except:
+            print(f"⚠️  无法自动打开浏览器，请手动访问上述URL")
+
+        # 2. 获取授权码
+        auth_code = input("\n请输入授权码(code): ").strip()
+
+        if not auth_code:
+            print("❌ 错误: 授权码不能为空")
+            return False
+
+        # 3. 交换访问令牌
+        token_url = "https://accounts.spotify.com/api/token"
+        auth_header = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+
+        headers = {
+            "Authorization": f"Basic {auth_header}",
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+
+        data = {
+            "grant_type": "authorization_code",
+            "code": auth_code,
+            "redirect_uri": self.redirect_uri
+        }
+
+        # 打印请求信息
+        self.print_request_info("POST", token_url, headers, {k: v for k, v in data.items() if k != 'code'})
+
+        try:
+            response = requests.post(token_url, headers=headers, data=data)
+
+            # 打印响应信息
+            self.print_response_info(response)
+
+            if response.status_code == 200:
+                token_data = response.json()
+                self.access_token = token_data.get("access_token")
+                self.refresh_token = token_data.get("refresh_token")
                 print("✅ Spotify API认证成功")
                 print(f"   令牌类型: {token_data.get('token_type')}")
                 print(f"   过期时间: {token_data.get('expires_in')}秒")
+                print(f"   权限范围: {token_data.get('scope')}")
                 return True
             else:
                 print(f"❌ 认证失败: {response.status_code}")
+                error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
+                if error_data.get('error'):
+                    print(f"   错误信息: {error_data.get('error_description', error_data.get('error'))}")
                 return False
-                
+
         except Exception as e:
             print(f"❌ 认证请求失败: {e}")
             return False
@@ -562,6 +658,8 @@ class SpotifyPlaylistSaver:
 
 def main():
     """命令行入口"""
+    load_environment()
+
     parser = argparse.ArgumentParser(description='Spotify歌单保存脚本')
     parser.add_argument('--csv', default='liked.csv', help='CSV文件路径 (默认: liked.csv)')
     parser.add_argument('--playlist', help='歌单名称 (如果不指定，只添加到已点赞)')
@@ -569,6 +667,7 @@ def main():
     parser.add_argument('--add-to-liked', action='store_true', help='同时添加到已点赞的歌曲')
     parser.add_argument('--client-id', help='Spotify Client ID (或设置SPOTIFY_CLIENT_ID环境变量)')
     parser.add_argument('--client-secret', help='Spotify Client Secret (或设置SPOTIFY_CLIENT_SECRET环境变量)')
+    parser.add_argument('--redirect-uri', help='Spotify重定向URI (或设置SPOTIFY_REDIRECT_URI环境变量，默认: http://localhost:8888/callback)')
     
     args = parser.parse_args()
     
@@ -587,7 +686,7 @@ def main():
         return
     
     # 创建保存器
-    saver = SpotifyPlaylistSaver(args.client_id, args.client_secret)
+    saver = SpotifyPlaylistSaver(args.client_id, args.client_secret, args.redirect_uri)
     
     # 运行
     success = saver.create_playlist_from_csv(
