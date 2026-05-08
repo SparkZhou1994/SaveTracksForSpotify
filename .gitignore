@@ -1,2 +1,25 @@
 CLAUDE.md
 .claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+spotify-env/
+venv/
+.env
+.env.local
+
+# User data
+spotify_user_data/
+*.log
+*.tmp
+
+# CSV data files (可选，根据需要是否提交)
+# liked.csv
+# result.csv
+# diff.csv
+# sorted.csv

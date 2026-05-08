@@ -22,9 +22,11 @@ from playwright.sync_api import sync_playwright, Page, TimeoutError as Playwrigh
 class SpotifyBrowserAdder:
     """Spotify 浏览器添加器"""
 
-    def __init__(self, headless: bool = False, slow_mo: int = 1000):
+    def __init__(self, headless: bool = False, slow_mo: int = 1000, user_data_dir: str = None, cdp_port: int = None):
         self.headless = headless
         self.slow_mo = slow_mo
+        self.user_data_dir = user_data_dir
+        self.cdp_port = cdp_port
         self.playwright = None
         self.browser = None
         self.context = None
@@ -35,19 +37,82 @@ class SpotifyBrowserAdder:
         """启动浏览器"""
         print("🌐 启动浏览器...")
         self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(
-            headless=self.headless,
-            slow_mo=self.slow_mo
-        )
-        self.context = self.browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        self.page = self.context.new_page()
+
+        if self.cdp_port:
+            # 连接到已打开的 Chrome 浏览器
+            print(f"🔗 连接到已打开的 Chrome (端口 {self.cdp_port})...")
+            self.browser = self.playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.cdp_port}")
+            self.context = self.browser.contexts[0] if self.browser.contexts else self.browser.new_context()
+            self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
+            print("✅ 已连接到现有浏览器")
+            print("💡 确保你已经在这个浏览器中登录了 Spotify")
+            return
+
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--start-maximized",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-web-security",
+            "--allow-running-insecure-content",
+            "--disable-features=IsolateOrigins,site-per-process"
+        ]
+
+        if self.user_data_dir:
+            # 使用持久化上下文，保留登录状态
+            print(f"💾 使用用户数据目录: {self.user_data_dir}")
+            self.context = self.playwright.chromium.launch_persistent_context(
+                self.user_data_dir,
+                headless=self.headless,
+                slow_mo=self.slow_mo,
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                args=launch_args
+            )
+            self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
+        else:
+            self.browser = self.playwright.chromium.launch(
+                headless=self.headless,
+                slow_mo=self.slow_mo,
+                args=launch_args
+            )
+            self.context = self.browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            self.page = self.context.new_page()
+
+        # 隐藏自动化特征
+        self.page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['zh-CN', 'zh', 'en']
+            });
+        """)
+
         print("✅ 浏览器启动成功")
 
     def login(self, wait_seconds: int = 180) -> bool:
         """登录 Spotify（用户手动登录）"""
+        # 如果是连接到已有浏览器，先检测是否已经登录
+        if self.cdp_port:
+            print("\n🔍 检测当前浏览器登录状态...")
+            self.page.goto(self.base_url)
+            time.sleep(2)
+
+            current_url = self.page.url
+            if "/login" not in current_url:
+                print("✅ 检测到已登录！")
+                return True
+
+            print("⚠️  尚未登录，请在浏览器中完成登录")
+
         print(f"\n🔐 打开 Spotify 登录页面...")
         self.page.goto(f"{self.base_url}/login")
         print(f"⏳ 请在 {wait_seconds} 秒内手动登录 Spotify 账号")
@@ -76,6 +141,12 @@ class SpotifyBrowserAdder:
 
             # 等待页面加载
             time.sleep(2)
+
+            # 检测歌曲是否存在（404页面或不存在提示）
+            page_content = self.page.content()
+            if "找不到" in page_content or "Not found" in page_content or "404" in self.page.url:
+                print(f"❌ 歌曲不存在: {song_info}")
+                return False
 
             # 尝试多种方式找到点赞按钮
             like_button = None
@@ -157,6 +228,7 @@ class SpotifyBrowserAdder:
         success_count = 0
         fail_count = 0
         skip_count = 0
+        failed_songs = []
 
         for i, song in enumerate(songs, 1):
             song_info = f"{song['track_name']} - {song['artist_name']}"
@@ -170,6 +242,9 @@ class SpotifyBrowserAdder:
                 skip_count += 1
             else:
                 fail_count += 1
+                failed_songs.append(song_info)
+                print(f"❌ 导入失败，停止流程")
+                break
 
             # 最后一首歌不需要等待
             if i < len(songs):
@@ -185,22 +260,33 @@ class SpotifyBrowserAdder:
         print(f"失败: {fail_count}")
         print(f"成功率: {success_count/len(songs)*100:.1f}%" if len(songs) > 0 else "0%")
         print(f"🕒 完成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        if failed_songs:
+            print("\n❌ 未导入的歌曲:")
+            for idx, song in enumerate(failed_songs, 1):
+                print(f"  {idx}. {song}")
+
         print("=" * 80)
 
         return {
             'total': len(songs),
             'success': success_count,
             'skip': skip_count,
-            'fail': fail_count
+            'fail': fail_count,
+            'failed_songs': failed_songs
         }
 
     def close(self):
         """关闭浏览器"""
-        if self.browser:
-            self.browser.close()
+        if self.cdp_port:
+            # 连接到外部浏览器时，只断开连接，不关闭浏览器
+            print("\n👋 已断开与浏览器的连接（浏览器保持打开）")
+        else:
+            if self.browser:
+                self.browser.close()
+            print("\n👋 浏览器已关闭")
         if self.playwright:
             self.playwright.stop()
-        print("\n👋 浏览器已关闭")
 
     def run(self, csv_path: str, delay: int = 3):
         """运行主流程"""
@@ -248,6 +334,9 @@ def main():
     parser.add_argument('--csv', default='liked.csv', help='CSV 文件路径 (默认: liked.csv)')
     parser.add_argument('--delay', type=int, default=3, help='每首歌的间隔秒数 (默认: 3)')
     parser.add_argument('--headless', action='store_true', help='无头模式 (不显示浏览器窗口)')
+    parser.add_argument('--persist', action='store_true', help='使用持久化登录状态，免去重复登录')
+    parser.add_argument('--user-data-dir', default='./spotify_user_data', help='用户数据目录路径 (默认: ./spotify_user_data)')
+    parser.add_argument('--connect-cdp', type=int, help='连接到已打开的 Chrome 浏览器，指定 CDP 端口 (例如: 9222)')
 
     args = parser.parse_args()
 
@@ -263,8 +352,24 @@ def main():
         print(f"❌ 错误: CSV 文件不存在: {csv_path}")
         return
 
+    # 确定用户数据目录
+    user_data_dir = None
+    if args.persist and not args.connect_cdp:
+        if not os.path.isabs(args.user_data_dir):
+            script_dir = Path(__file__).parent
+            user_data_dir = str(script_dir / args.user_data_dir)
+        else:
+            user_data_dir = args.user_data_dir
+        print(f"💾 持久化登录模式: {user_data_dir}")
+        print("💡 提示：首次使用需要手动登录，之后会自动记住登录状态")
+
     # 创建添加器
-    adder = SpotifyBrowserAdder(headless=args.headless, slow_mo=500)
+    adder = SpotifyBrowserAdder(
+        headless=args.headless,
+        slow_mo=500,
+        user_data_dir=user_data_dir,
+        cdp_port=args.connect_cdp
+    )
 
     # 运行
     success = adder.run(csv_path, args.delay)

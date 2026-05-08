@@ -6,8 +6,9 @@
 
 1. [方式一：浏览器自动化（推荐）](#方式一浏览器自动化推荐)
 2. [方式二：Spotify Web API（需Premium）](#方式二spotify-web-api需premium)
-3. [CSV 文件格式](#csv-文件格式)
-4. [常见问题](#常见问题)
+3. [CSV 比较工具](#csv-比较工具)
+4. [CSV 文件格式](#csv-文件格式)
+5. [常见问题](#常见问题)
 
 ---
 
@@ -88,6 +89,38 @@ python save_to_spotify.py --csv liked.csv --playlist "我的收藏"
 
 ---
 
+## CSV 比较工具
+
+用于找出本地歌单和已导入歌单的差异，只导入新增歌曲。
+
+### 用法
+
+```bash
+# 比较 liked.csv 和 result.csv，导出差异到 diff.csv
+python compare_csv.py
+```
+
+**文件说明：**
+- `liked.csv`: 你完整的歌单
+- `result.csv`: 已经成功导入到 Spotify 的歌单（通常是从 Spotify 导出的）
+- `diff.csv`: 输出文件，包含所有在 liked.csv 中但不在 result.csv 中的歌曲
+
+**示例输出：**
+```
+🔍 比较 liked.csv 和 result.csv...
+✅ liked.csv: 613 首歌曲
+✅ result.csv: 618 首歌曲
+📊 结果：20 首歌曲只存在于 liked.csv 中
+💾 已导出到 diff.csv
+```
+
+然后你可以只导入差异部分：
+```bash
+python browser_spotify.py --connect-cdp 9222 --csv diff.csv
+```
+
+---
+
 ## CSV 文件格式
 
 CSV 文件必须包含以下字段：
@@ -129,8 +162,12 @@ A: 目前版本不支持断点续传，但已点赞的歌曲会被自动跳过�
 spotify/
 ├── browser_spotify.py    # 浏览器自动化脚本（推荐）
 ├── save_to_spotify.py    # Spotify API 脚本
-├── liked.csv             # 小样本测试数据
-├── sorted.csv            # 完整歌曲数据（612首）
+├── compare_csv.py        # CSV 比较工具，找出新增歌曲
+├── start_chrome.bat      # 启动 Chrome 调试模式脚本
+├── liked.csv             # 完整的本地歌单
+├── result.csv            # 已成功导入到 Spotify 的歌单
+├── diff.csv              # 差异文件（只在 liked.csv 中的歌曲）
+├── sorted.csv            # 排序后的歌曲数据
 ├── .env.example          # 环境变量模板
 ├── spotify-env/          # Python 虚拟环境
 └── README.md             # 本文档
